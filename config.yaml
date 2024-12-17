@@ -1,0 +1,15 @@
+terminal: wezterm
+
+root:
+  name: envs
+  children:
+    - name: local
+      children:
+        - name: godoc
+          children:
+            - command: >
+                go list std
+              children:
+                - command: go doc -short $current | grep '^[ ]*func' | sed -E 's/^[ ]*func ([^[(]+).*/\1/'
+                  children:
+                  - finalCommand: go doc $parent.$current | less
