@@ -3,21 +3,36 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	fzf "github.com/junegunn/fzf/src"
 	"github.com/rivo/tview"
+	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
 
-const sep = " > "
+const (
+	terminalWezTerm = "wezterm"
+
+	sep = " > "
+
+	pageMain  = "main"
+	pageError = "error"
+	buttonOK  = "OK"
+)
+
+var dots = []string{"⣾ ", "⣽ ", "⣻ ", "⢿ ", "⡿ ", "⣟ ", "⣯ ", "⣷ "}
 
 type Config struct {
-	Root Node `yaml:"root"`
+	Terminal string `yaml:"terminal"`
+	Root     Node   `yaml:"root"`
 }
 
 type Node struct {
@@ -34,15 +49,17 @@ type Reference struct {
 	children   []Node
 }
 
-// Show a navigable tree view of the current directory.
 func main() {
-	if err := run(); err != nil {
+	cFlag := flag.String("c", "config.yaml", "Path to the config file")
+	flag.Parse()
+
+	if err := run(cFlag); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run() error {
-	f, err := os.ReadFile("config.yaml")
+func run(cFlag *string) error {
+	f, err := os.ReadFile(*cFlag)
 	if err != nil {
 		return fmt.Errorf("open file: %s", err)
 	}
@@ -52,67 +69,94 @@ func run() error {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
 
+	if c.Terminal == "" {
+		c.Terminal = terminalWezTerm
+	}
+
+	pages := tview.NewPages()
+
 	rootName := c.Root.Name
 	root := tview.NewTreeNode(rootName).
 		SetColor(tcell.ColorRed)
 	tree := tview.NewTreeView().
 		SetRoot(root).
 		SetCurrentNode(root)
+	tree.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Rune() {
+		case 'l':
+			tree.GetCurrentNode().SetExpanded(true)
+		case 'h':
+			tree.GetCurrentNode().SetExpanded(false)
+		}
+		return event
+	})
 
 	m := make(map[string]*tview.TreeNode)
 
-	add := func(target *tview.TreeNode, path string, nodes []Node) error {
-		var childs []string
-		if hasCommand(nodes) {
-			node := nodes[0]
-			out, err := executeCommand(nodes[0].Command)
-			if err != nil {
-				panic(err)
-			}
-			childs = append(childs, out...)
-			for _, child := range childs {
-				ref := &Reference{
-					name:       child,
-					parentName: target.GetText(),
-					path:       path + sep + child,
-					children:   node.Children,
-				}
-				tn := tview.NewTreeNode(child).
-					SetText(child).
-					SetReference(ref).
-					SetSelectable(true)
-				target.AddChild(tn)
-				m[ref.path] = tn
-			}
-		} else {
-			for _, node := range nodes {
-				if node.Command != "" {
-					out, err := executeCommand(node.Command)
+	app := tview.NewApplication()
+
+	add := func(target *tview.TreeNode, path string, parentName *string, nodes []Node) error {
+		target.SetColor(tcell.ColorRed)
+
+		text := target.GetText()
+
+		for _, node := range nodes {
+			done := make(chan struct{})
+			if node.Command != "" {
+				go func() {
+					ticker := time.NewTicker(100 * time.Millisecond)
+					defer ticker.Stop()
+
+					i := 0
+					for {
+						select {
+						case <-done:
+							return
+						case <-ticker.C:
+							app.QueueUpdateDraw(func() {
+								target.SetText(text + " " + dots[i%len(dots)])
+								i += 1
+							})
+						}
+					}
+				}()
+
+				go func() {
+					defer close(done)
+
+					expandedCommand, out, err := execCommand(node.Command, target.GetText(), *parentName)
 					if err != nil {
-						panic(err)
+						app.QueueUpdateDraw(func() {
+							showError(app, pages, tree, fmt.Sprintf("%s: %s: %v", expandedCommand, out, err))
+						})
+						return
 					}
-					childs = append(childs, out...)
-				} else {
-					ref := &Reference{
-						name:       node.Name,
-						parentName: target.GetText(),
-						path:       path + sep + node.Name,
-						children:   node.Children,
-					}
-					tn := tview.NewTreeNode(node.Name).
-						SetText(node.Name).
-						SetReference(ref).
-						SetSelectable(true)
-					target.AddChild(tn)
-					m[ref.path] = tn
-				}
+
+					app.QueueUpdateDraw(func() {
+						target.SetText(text)
+
+						scanner := bufio.NewScanner(bytes.NewReader(out))
+						for scanner.Scan() {
+							addChild(target, path, scanner.Text(), node.Children, m)
+						}
+
+						if err := scanner.Err(); err != nil {
+							showError(app, pages, tree, err.Error())
+							return
+						}
+					})
+				}()
+			}
+
+			if node.Name != "" {
+				addChild(target, path, node.Name, node.Children, m)
 			}
 		}
 
 		return nil
 	}
 
-	if err := add(root, rootName, c.Root.Children); err != nil {
+	if err := add(root, rootName, nil, c.Root.Children); err != nil {
 		return fmt.Errorf("add child: %w", err)
 	}
 
@@ -123,26 +167,24 @@ func run() error {
 		}
 		ref, ok := reference.(*Reference)
 		if !ok {
-			panic("wrong reference type")
+			showError(app, pages, tree, "This node has wrong reference type")
+			return
 		}
 		children := node.GetChildren()
 		if len(children) == 0 {
-			if hasFinalCommand(ref.children) {
-				command := os.Expand(ref.children[0].FinalCommand, func(variable string) string {
-					if variable == "pod" || variable == "service" {
-						return ref.name
-					}
-					if variable == "host" {
-						return ref.parentName
-					}
-					return ""
-				})
-				out, err := exec.Command("sh", "-c", command).CombinedOutput()
+			if isLeafNode(ref.children) {
+				finalCommand := ref.children[0].FinalCommand
+				switch c.Terminal {
+				case terminalWezTerm:
+					finalCommand = fmt.Sprintf("pane_id=$(wezterm cli get-pane-direction right); if test -z $pane_id; then pane_id=$(wezterm cli split-pane --right --percent 75); fi; echo \"%s\" | wezterm cli send-text --pane-id $pane_id; printf \"\r\" | wezterm cli send-text --pane-id $pane_id --no-paste; wezterm cli activate-pane-direction right", ref.children[0].FinalCommand)
+				}
+
+				expandedCommand, out, err := execCommand(finalCommand, ref.name, ref.parentName)
 				if err != nil {
-					panic(fmt.Errorf("%s: %w", out, err))
+					showError(app, pages, tree, fmt.Sprintf("%s: %s: %v", expandedCommand, out, err))
 				}
 			} else {
-				add(node, ref.path, ref.children)
+				add(node, ref.path, &ref.parentName, ref.children)
 			}
 		} else {
 			// Collapse if visible, expand if collapsed.
@@ -150,11 +192,15 @@ func run() error {
 		}
 	})
 
-	app := tview.NewApplication()
+	_, height, err := term.GetSize(0)
+	if err != nil {
+		return fmt.Errorf("get terminal size: %w", err)
+	}
+
 	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Rune() == '/' {
 			app.Suspend(func() {
-				if err := search(tree, m); err != nil {
+				if err := search(tree, m, height); err != nil {
 					return
 				}
 			})
@@ -162,54 +208,38 @@ func run() error {
 		return event
 	})
 
-	if err := app.SetRoot(tree, true).Run(); err != nil {
+	pages.AddPage(pageMain, tree, true, true)
+	if err := app.SetRoot(pages, true).Run(); err != nil {
 		return fmt.Errorf("run: %w", err)
 	}
 
 	return nil
 }
 
-func hasCommand(nodes []Node) bool {
-	return len(nodes) == 1 && nodes[0].Command != ""
+func addChild(target *tview.TreeNode, path, text string, children []Node, m map[string]*tview.TreeNode) {
+	ref := &Reference{
+		name:       text,
+		parentName: target.GetText(),
+		path:       path + sep + text,
+		children:   children,
+	}
+	tn := tview.NewTreeNode(text).
+		SetText(text).
+		SetReference(ref).
+		SetSelectable(true)
+	target.AddChild(tn)
+	m[ref.path] = tn
 }
 
-func hasFinalCommand(nodes []Node) bool {
+func isLeafNode(nodes []Node) bool {
 	return len(nodes) == 1 && nodes[0].FinalCommand != ""
 }
 
-func executeCommand(command string) ([]string, error) {
-	out, err := exec.Command("sh", "-c", command).CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", out, err)
-	}
-
-	var childs []string
-	scanner := bufio.NewScanner(bytes.NewReader(out))
-	for scanner.Scan() {
-		childs = append(childs, scanner.Text())
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan: %w", err)
-	}
-
-	return childs, nil
-}
-
-func search(tree *tview.TreeView, m map[string]*tview.TreeNode) error {
+func search(tree *tview.TreeView, m map[string]*tview.TreeNode, height int) error {
 	var paths []string
-	tree.GetCurrentNode().Walk(func(node, parent *tview.TreeNode) bool {
-		reference := node.GetReference()
-		if reference == nil {
-			return false
-		}
-		ref, ok := reference.(*Reference)
-		if !ok {
-			panic("wrong reference type")
-		}
-		paths = append(paths, ref.path)
-		return true
-	})
+	for path, _ := range m {
+		paths = append(paths, path)
+	}
 
 	inputChan := make(chan string)
 	go func() {
@@ -225,13 +255,19 @@ func search(tree *tview.TreeView, m map[string]*tview.TreeNode) error {
 			node, ok := m[path]
 			if ok {
 				tree.SetCurrentNode(node)
+				if selectedFunc := tree.GetSelectedFunc(); selectedFunc != nil {
+					selectedFunc(node)
+				}
+				tree.Move(height - 1)
+				tree.SetCurrentNode(nil)
+				tree.SetCurrentNode(node)
 			}
 		}
 	}()
 
 	options, err := fzf.ParseOptions(
 		true,
-		[]string{"--height=50%"},
+		[]string{"--height=50%", "--multi"},
 	)
 	if err != nil {
 		return fmt.Errorf("fzf: parse options: %w", err)
@@ -246,4 +282,45 @@ func search(tree *tview.TreeView, m map[string]*tview.TreeNode) error {
 	}
 
 	return nil
+}
+
+func execCommand(command, current, parent string) (string, []byte, error) {
+	command = os.Expand(command, func(variable string) string {
+		switch variable {
+		case "current":
+			return fmt.Sprintf("%q", current)
+		case "parent":
+			return parent
+		}
+
+		return fmt.Sprintf("$%s", variable)
+	})
+
+	expandedCommand := command
+	if strings.Contains(command, "|") {
+		expandedCommand = fmt.Sprintf("set -o pipefail; %s", command)
+	}
+	out, err := exec.Command("sh", "-c", expandedCommand).CombinedOutput()
+	if err != nil {
+		return "", nil, fmt.Errorf("%s: %s: %w", command, out, err)
+	}
+
+	return command, out, nil
+}
+
+func showError(app *tview.Application, pages *tview.Pages, tree *tview.TreeView, msg string) {
+	modal := tview.NewModal()
+	modal.AddButtons([]string{buttonOK})
+
+	modal.
+		SetText(msg).
+		SetFocus(0).
+		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+			if buttonLabel == buttonOK {
+				pages.HidePage(pageError)
+				app.SetRoot(pages, true).SetFocus(tree)
+			}
+		})
+	pages.AddPage(pageError, modal, true, true)
+	pages.ShowPage(pageError)
 }
