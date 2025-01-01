@@ -1,23 +1,32 @@
 # fe
 
-Fuzzy Explorer for everything: logs, configs, Kafka topics, and more.
+![Fuzzy Explorer](./fuzzy-explorer.png)
 
-If there is only one tool you would like to introduce to every sysadmin, devops engineer, ... anyone who live in a terminal, mine is [fzf](https://github.com/junegunn/fzf). I'm using it for everything whenever I want to search, then do something on the results:
+Fuzzy Explorer is your ultimate terminal companion for navigating logs, configurations, Kafka topics, and more.
 
-- `brew search` then `brew install`
-- `ps -ef | grep` then `kill/killall`
-- open a Jira issue in the last week in the web browser
-- open your project in the favorite editor
-- copy a password from KeepassXC to the clipboard
-- quick look Sentry issues
+If there is one tool I would recommend to every sysadmin, DevOps engineer, or anyone who lives in a terminal, it's [fzf](https://github.com/junegunn/fzf). I use it for nearly everything: searching and taking action on the results. Here are some examples of what you can do:
+
+- Search with `brew search` then install with `brew install`
+- Find processes with `ps -ef | grep` then terminal with `kill`
+- Open a recent Jira issue in your web browser
+- Launch your project in your favorite editor
+- Copy a password from KeepassXC to the clipboard
+- Retrieve secrets from Vault
+- Query Kafka topics
+- Quickly view Sentry issues
+- Tail logs using [lnav](https://lnav.org/)
 - ...
 
-However, if a command takes sometime to populate a list, I want to keep fzf open after selecting:
+However, there are situations where you might want it to stay open after making selection, such as when commands take time to generate a list of options:
 
 - https://github.com/junegunn/fzf/issues/2213
 - https://github.com/junegunn/fzf.vim/issues/192 
 
-That's where Fuzzy Explorer can help.
+Fuzzy Explorer solves this problem by keeping the tree open, allowing you to seamlessly explorer and act on hierarchical data.
+
+## Requirements
+
+- [WezTerm](https://wezfurlong.org/wezterm/index.html)
 
 ## Installation
 
@@ -35,46 +44,30 @@ go install github.com/quantonganh/fe@latest
 
 ## Usage
 
-Ensure that you're using [fish shell](https://fishshell.com/) with the [fish_title](https://fishshell.com/docs/current/cmds/fish_title.html) [function](https://github.com/fish-shell/fish-shell/blob/master/share/functions/fish_title.fish). This will allow you to see `hx` in the pane title when listing panes using `wezterm cli list --format json`:
+First, create a configuration file to define your exploration hierarchy:
+
+```yaml
+terminal: wezterm
+
+root:
+  name: envs
+  children:
+    - name: local
+      children:
+        - name: godoc
+          children:
+            - command: >
+                go list std
+              children:
+                - command: go doc -short $current | grep '^[ ]*func' | sed -E 's/^[ ]*func ([^[(]+).*/\1/'
+                  children:
+                  - finalCommand: go doc $parent.$current | less
+```
+
+Run the program with your configuration:
 
 ```sh
-  {
-    "window_id": 0,
-    "tab_id": 167,
-    "pane_id": 350,
-    "workspace": "default",
-    "size": {
-      "rows": 48,
-      "cols": 175,
-      "pixel_width": 2975,
-      "pixel_height": 1776,
-      "dpi": 144
-    },
-    "title": "hx . ~/C/p/helix-wezterm",
+fe -c /path/to/config.yaml
 ```
 
-Install the requirements:
-
-- [bat](https://github.com/sharkdp/bat) for file previews
-- [broot](https://github.com/Canop/broot)
-- [fish shell](https://fishshell.com/)
-- [gh](https://cli.github.com/)
-- [howdoi](https://github.com/gleitz/howdoi)
-- [lazygit](https://github.com/jesseduffield/lazygit)
-- [ripgrep](https://github.com/BurntSushi/ripgrep) for grep-like searching
-- [tig](https://jonas.github.io/tig/)
-- [tgpt](https://github.com/aandrew-me/tgpt)
-
-Add the following into `~/.config/helix/config.toml`:
-
-```toml
-[keys.normal.space.","]
-b = ":sh helix-wezterm.sh blame"
-c = ":sh helix-wezterm.sh check"
-e = ":sh helix-wezterm.sh explorer"
-f = ":sh helix-wezterm.sh fzf"
-g = ":sh helix-wezterm.sh lazygit"
-o = ":sh helix-wezterm.sh open"
-r = ":sh helix-wezterm.sh run"
-t = ":sh helix-wezterm.sh test"
-```
+With Fuzzy Explorer, you can quickly navigate complex data structure, perform contextual actions, and stay in control of your workflow.
