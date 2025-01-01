@@ -33,7 +33,7 @@ Fuzzy Explorer solves this problem by keeping the tree open, allowing you to sea
 ### Install via homebrew
 
 ```
-$ brew install quantonganh/tap/fe
+brew install quantonganh/tap/fe
 ```
 
 ### Install via go
@@ -69,5 +69,9 @@ Run the program with your configuration:
 ```sh
 fe -c /path/to/config.yaml
 ```
+
+Navigate through the selection using [vim-like key bindings](https://pkg.go.dev/github.com/rivo/tview#TreeView).
+
+Press `/` to search using `fzf`.
 
 With Fuzzy Explorer, you can quickly navigate complex data structure, perform contextual actions, and stay in control of your workflow.
