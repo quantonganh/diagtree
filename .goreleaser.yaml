@@ -1,5 +1,6 @@
 # This is an example .goreleaser.yml file with some sensible defaults.
 # Make sure to check the documentation at https://goreleaser.com
+version: 2
 before:
   hooks:
     # You may remove this if you don't use go modules.
@@ -37,8 +38,6 @@ archives:
       format: zip
 checksum:
   name_template: 'checksums.txt'
-snapshot:
-  name_template: "{{ incpatch .Version }}-next"
 changelog:
   sort: asc
   filters:
@@ -55,7 +54,7 @@ brews:
   - repository:
       owner: quantonganh
       name: homebrew-tap
-    folder: Formula
+    directory: Formula
     homepage: https://github.com/quantonganh/fe
     description: >-
       Fuzzy Explorer for everything: logs, configs, Kafka topics, and more.
