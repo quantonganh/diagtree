@@ -296,6 +296,8 @@ func (a *App) run(cFlag *string) error {
 
 	a.textView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Rune() {
+		case 'h':
+			a.app.SetFocus(a.tree)
 		case '/':
 			a.app.SetFocus(a.search)
 		case 'y':
