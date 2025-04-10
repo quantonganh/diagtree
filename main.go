@@ -18,7 +18,6 @@ import (
 	fzf "github.com/junegunn/fzf/src"
 	"github.com/rivo/tview"
 	"golang.design/x/clipboard"
-	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
 
@@ -34,7 +33,7 @@ const (
 var dots = []string{"⣾ ", "⣽ ", "⣻ ", "⢿ ", "⡿ ", "⣟ ", "⣯ ", "⣷ "}
 
 type Config struct {
-	Root Node `yaml:"root"`
+	Root Item `yaml:"root"`
 }
 
 type App struct {
@@ -45,20 +44,26 @@ type App struct {
 	search      *tview.InputField
 	error       *tview.Modal
 	pathToNodes map[string]*tview.TreeNode
-	m           map[string]*tview.TextView
+	pathToItems map[string]Item
 }
 
-type Node struct {
-	Name        string   `yaml:"name,omitempty"`
-	Command     string   `yaml:"command,omitempty"`
-	LeafCommand string   `yaml:"leafCommand"`
-	Stream      bool     `yaml:"stream"`
-	Envs        []string `yaml:"envs"`
-	Children    []Node   `yaml:"children,omitempty"`
+type Item struct {
+	Name      string `yaml:"name,omitempty"`
+	OnExpand  string `yaml:"onExpand,omitempty"`
+	OnPreview string `yaml:"onPreview,omitempty"`
+	OnSelect  string `yaml:"onSelect"`
+	Stream    bool   `yaml:"stream"`
+	Envs      []Env  `yaml:"envs"`
+	Children  []Item `yaml:"children,omitempty"`
+}
+
+type Env struct {
+	Name  string `yaml:"name"`
+	Width int    `yaml:"width"`
 }
 
 type Reference struct {
-	node   Node
+	item   Item
 	parent *tview.TreeNode
 	path   string
 }
@@ -97,7 +102,7 @@ func newApp() *App {
 		search:      search,
 		error:       modal,
 		pathToNodes: make(map[string]*tview.TreeNode),
-		m:           make(map[string]*tview.TextView),
+		pathToItems: make(map[string]Item),
 	}
 }
 
@@ -117,16 +122,16 @@ func (a *App) run(cFlag *string) error {
 		SetColor(tcell.ColorRed)
 	tree := a.tree.SetRoot(root).SetCurrentNode(root)
 
-	add := func(target *tview.TreeNode, path string, parentName *string, nodes []Node) error {
-		target.SetColor(tcell.ColorRed)
+	add := func(node *tview.TreeNode, path string, parentName *string, items []Item) error {
+		node.SetColor(tcell.ColorRed)
 
-		for _, node := range nodes {
-			if node.Command != "" {
-				a.execCommand(target, path, parentName, node.Command, node.Children, false)
+		for _, item := range items {
+			if item.OnExpand != "" {
+				a.addChildItems(node, path, parentName, item.OnExpand, item.Children)
 			}
 
-			if node.Name != "" {
-				addChild(target, path, node.Name, node.Children, a.pathToNodes)
+			if item.Name != "" {
+				a.addChildNode(node, path, item.Name, item.Children)
 			}
 		}
 
@@ -154,14 +159,14 @@ func (a *App) run(cFlag *string) error {
 		children := node.GetChildren()
 		if len(children) == 0 {
 			parentName := ref.parent.GetText()
-			if isLeafNode(ref.node.Children) {
+			if isLeafNode(ref.item.Children) {
 				w := tview.ANSIWriter(a.textView)
-				command := ref.node.Children[0].LeafCommand
-				if ref.node.Children[0].Stream {
+				command := ref.item.Children[0].OnSelect
+				if ref.item.Children[0].Stream {
 					command = os.Expand(command, func(variable string) string {
 						switch variable {
 						case "current":
-							return fmt.Sprintf("%q", ref.node.Name)
+							return fmt.Sprintf("%q", ref.item.Name)
 						case "parent":
 							return parentName
 						}
@@ -225,26 +230,21 @@ func (a *App) run(cFlag *string) error {
 						}
 					}(cancelCurrentCmd)
 				} else {
-					envs := ref.node.Children[0].Envs
+					envs := ref.item.Children[0].Envs
 					if len(envs) != 0 {
-						a.addEnvs(envs, ref.node.Children[0].LeafCommand, node, ref.path, &parentName, ref.node.Children)
+						a.addEnvs(envs, ref.item.Children[0].OnSelect, []*tview.TreeNode{node}, &parentName)
 					} else {
-						a.execCommand(node, ref.path, &parentName, ref.node.Children[0].LeafCommand, ref.node.Children, true)
+						a.execCommand([]*tview.TreeNode{node}, &parentName, ref.item.Children[0].OnSelect, true)
 					}
 				}
 			} else {
-				add(node, ref.path, &parentName, ref.node.Children)
+				add(node, ref.path, &parentName, ref.item.Children)
 			}
 		} else {
 			// Collapse if visible, expand if collapsed.
 			node.SetExpanded(!node.IsExpanded())
 		}
 	})
-
-	_, height, err := term.GetSize(0)
-	if err != nil {
-		return fmt.Errorf("get terminal size: %w", err)
-	}
 
 	a.tree.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Rune() {
@@ -267,6 +267,23 @@ func (a *App) run(cFlag *string) error {
 			if selectedFunc := tree.GetSelectedFunc(); selectedFunc != nil {
 				selectedFunc(tree.GetCurrentNode())
 			}
+		case 'p':
+			node := tree.GetCurrentNode()
+			reference := node.GetReference()
+			if reference == nil {
+				return nil
+			}
+			ref, ok := reference.(*Reference)
+			if !ok {
+				return nil
+			}
+			children := node.GetChildren()
+			if len(children) == 0 {
+				parentName := ref.parent.GetText()
+				if isLeafNode(ref.item.Children) {
+					a.execCommand([]*tview.TreeNode{node}, &parentName, ref.item.Children[0].OnPreview, false)
+				}
+			}
 		case 'r':
 			reference := tree.GetCurrentNode().GetReference()
 			if reference == nil {
@@ -282,10 +299,10 @@ func (a *App) run(cFlag *string) error {
 			node.ClearChildren()
 
 			parentName := ref.parent.GetText()
-			add(node, ref.path, &parentName, ref.node.Children)
+			add(node, ref.path, &parentName, ref.item.Children)
 		case '/':
 			a.app.Suspend(func() {
-				if err := search(tree, a.pathToNodes, height); err != nil {
+				if err := a.fzf(); err != nil {
 					return
 				}
 			})
@@ -317,12 +334,10 @@ func (a *App) run(cFlag *string) error {
 
 	a.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
-		case tcell.KeyCtrlH:
+		case tcell.KeyTab:
 			a.app.SetFocus(tree)
 		case tcell.KeyCtrlL:
 			a.app.SetFocus(a.textView)
-		case tcell.KeyCtrlJ:
-			a.app.SetFocus(a.search)
 		case tcell.KeyEsc:
 			a.pages.SwitchToPage(pageMain)
 		}
@@ -367,31 +382,32 @@ func (a *App) run(cFlag *string) error {
 	return nil
 }
 
-func addChild(target *tview.TreeNode, path, text string, children []Node, m map[string]*tview.TreeNode) {
-	n := Node{
+func (a *App) addChildNode(node *tview.TreeNode, path, text string, children []Item) {
+	item := Item{
 		Name:     text,
 		Children: children,
 	}
 	ref := &Reference{
-		node:   n,
-		parent: target,
+		item:   item,
+		parent: node,
 		path:   path + sep + text,
 	}
-	tn := tview.NewTreeNode(text).
+	childNode := tview.NewTreeNode(text).
 		SetText(text).
 		SetReference(ref).
 		SetSelectable(true)
-	target.AddChild(tn)
-	m[ref.path] = tn
+	node.AddChild(childNode)
+	a.pathToNodes[ref.path] = childNode
+	a.pathToItems[ref.path] = item.Children[0]
 }
 
-func isLeafNode(nodes []Node) bool {
-	return len(nodes) == 1 && nodes[0].LeafCommand != ""
+func isLeafNode(items []Item) bool {
+	return len(items) == 1 && items[0].OnSelect != ""
 }
 
-func search(tree *tview.TreeView, pathToNodes map[string]*tview.TreeNode, height int) error {
+func (a *App) fzf() error {
 	var paths []string
-	for path := range pathToNodes {
+	for path := range a.pathToNodes {
 		paths = append(paths, path)
 	}
 
@@ -404,17 +420,35 @@ func search(tree *tview.TreeView, pathToNodes map[string]*tview.TreeNode, height
 	}()
 
 	outputChan := make(chan string)
+	var (
+		nodes      []*tview.TreeNode
+		parentName string
+		item       Item
+		onSelect   string
+	)
 	go func() {
 		for path := range outputChan {
-			node, ok := pathToNodes[path]
+			node, ok := a.pathToNodes[path]
 			if ok {
-				tree.SetCurrentNode(node)
-				if selectedFunc := tree.GetSelectedFunc(); selectedFunc != nil {
-					selectedFunc(node)
+				nodes = append(nodes, node)
+
+				if parentName == "" {
+					reference := node.GetReference()
+					if reference == nil {
+						return
+					}
+					ref, ok := reference.(*Reference)
+					if !ok {
+						a.showError(errors.New("This node has wrong reference type"))
+						return
+					}
+					parentName = ref.parent.GetText()
 				}
-				tree.Move(height - 1)
-				tree.SetCurrentNode(nil)
-				tree.SetCurrentNode(node)
+			}
+
+			item, ok = a.pathToItems[path]
+			if ok && onSelect == "" {
+				onSelect = item.OnSelect
 			}
 		}
 	}()
@@ -435,14 +469,20 @@ func search(tree *tview.TreeView, pathToNodes map[string]*tview.TreeNode, height
 		return fmt.Errorf("fzf: run: %w", err)
 	}
 
+	if len(item.Envs) != 0 {
+		a.addEnvs(item.Envs, onSelect, nodes, &parentName)
+	} else {
+		a.execCommand(nodes, &parentName, onSelect, true)
+	}
+
 	return nil
 }
 
-func execCommand(command, current, parent string) (string, []byte, error) {
+func execCommand(command, selectedItems, parent string) (string, []byte, error) {
 	command = os.Expand(command, func(variable string) string {
 		switch variable {
 		case "current":
-			return fmt.Sprintf("%q", current)
+			return selectedItems
 		case "parent":
 			return parent
 		}
@@ -476,21 +516,21 @@ func (a *App) showError(err error) {
 	a.pages.ShowPage(pageError)
 }
 
-func (a *App) addEnvs(envs []string, command string, node *tview.TreeNode, path string, parentName *string, children []Node) {
+func (a *App) addEnvs(envs []Env, command string, nodes []*tview.TreeNode, parentName *string) {
 	inputFields := make([]*tview.InputField, len(envs))
 	m := make(map[string]*tview.InputField)
 	const width = 15
 	maxLen := 0
 	for i, env := range envs {
-		inputField := tview.NewInputField().SetLabel(fmt.Sprintf("%s: ", env))
+		inputField := tview.NewInputField().SetLabel(fmt.Sprintf("%s: ", env.Name))
 		inputField.
-			SetFieldWidth(width).
+			SetFieldWidth(env.Width).
 			SetBorder(true)
 		inputFields[i] = inputField
-		m[env] = inputField
+		m[env.Name] = inputField
 
-		if len(env) > maxLen {
-			maxLen = len(env)
+		if len(env.Name)+env.Width > maxLen {
+			maxLen = len(env.Name) + env.Width
 		}
 	}
 
@@ -504,11 +544,14 @@ func (a *App) addEnvs(envs []string, command string, node *tview.TreeNode, path 
 						a.app.SetFocus(fields[i+1])
 					} else {
 						command = os.Expand(command, func(variable string) string {
-							return m[variable].GetText()
+							if v, ok := m[variable]; ok {
+								return v.GetText()
+							}
+							return fmt.Sprintf("$%s", variable)
 						})
 
 						a.pages.HidePage(pageEnvs)
-						a.execCommand(node, path, parentName, command, children, true)
+						a.execCommand(nodes, parentName, command, true)
 					}
 				}
 			})
@@ -522,13 +565,13 @@ func (a *App) addEnvs(envs []string, command string, node *tview.TreeNode, path 
 			AddItem(nil, 0, 1, false)
 	}
 
-	a.pages.AddPage(pageEnvs, modal(inputFields, maxLen+width+4, 3), true, true)
+	a.pages.AddPage(pageEnvs, modal(inputFields, maxLen+4, 3), true, true)
 	a.pages.ShowPage(pageEnvs)
 	a.app.SetFocus(inputFields[0])
 }
 
-func (a *App) execCommand(target *tview.TreeNode, path string, parentName *string, command string, children []Node, isLeaf bool) {
-	text := target.GetText()
+func (a *App) addChildItems(node *tview.TreeNode, path string, parentName *string, command string, children []Item) {
+	text := node.GetText()
 	done := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(100 * time.Millisecond)
@@ -541,7 +584,7 @@ func (a *App) execCommand(target *tview.TreeNode, path string, parentName *strin
 				return
 			case <-ticker.C:
 				a.app.QueueUpdateDraw(func() {
-					target.SetText(text + " " + dots[i%len(dots)])
+					node.SetText(text + " " + dots[i%len(dots)])
 					i += 1
 				})
 			}
@@ -553,7 +596,7 @@ func (a *App) execCommand(target *tview.TreeNode, path string, parentName *strin
 			close(done)
 
 			a.app.QueueUpdateDraw(func() {
-				target.SetText(text)
+				node.SetText(text)
 			})
 		}()
 
@@ -565,28 +608,73 @@ func (a *App) execCommand(target *tview.TreeNode, path string, parentName *strin
 			return
 		}
 
-		if isLeaf {
-			a.textView.Clear()
-			if _, err := io.Copy(tview.ANSIWriter(a.textView), bytes.NewBuffer(out)); err != nil {
+		a.app.QueueUpdateDraw(func() {
+			scanner := bufio.NewScanner(bytes.NewReader(out))
+			for scanner.Scan() {
+				a.addChildNode(node, path, scanner.Text(), children)
+			}
+
+			if err := scanner.Err(); err != nil {
 				a.showError(err)
 				return
 			}
+		})
+	}()
+}
 
+func (a *App) execCommand(nodes []*tview.TreeNode, parentName *string, command string, onSelect bool) {
+	done := make(chan struct{})
+	items := make([]string, len(nodes))
+	for i, node := range nodes {
+		text := node.GetText()
+		items[i] = text
+		go func() {
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+
+			i := 0
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+					a.app.QueueUpdateDraw(func() {
+						node.SetText(text + " " + dots[i%len(dots)])
+						i += 1
+					})
+				}
+			}
+		}()
+	}
+
+	go func() {
+		defer func() {
+			close(done)
+
+			for i, node := range nodes {
+				a.app.QueueUpdateDraw(func() {
+					node.SetText(items[i])
+				})
+			}
+		}()
+
+		expandedCommand, out, err := execCommand(command, strings.Join(items, " "), *parentName)
+		if err != nil {
+			a.app.QueueUpdateDraw(func() {
+				a.showError(fmt.Errorf("%s: %s: %v", expandedCommand, out, err))
+			})
+			return
+		}
+
+		a.textView.Clear()
+		if _, err := io.Copy(tview.ANSIWriter(a.textView), bytes.NewBuffer(out)); err != nil {
+			a.showError(err)
+			return
+		}
+
+		if onSelect {
 			a.textView.ScrollToEnd()
 			a.app.SetFocus(a.textView)
-
-		} else {
-			a.app.QueueUpdateDraw(func() {
-				scanner := bufio.NewScanner(bytes.NewReader(out))
-				for scanner.Scan() {
-					addChild(target, path, scanner.Text(), children, a.pathToNodes)
-				}
-
-				if err := scanner.Err(); err != nil {
-					a.showError(err)
-					return
-				}
-			})
 		}
 	}()
 }
