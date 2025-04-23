@@ -1,4 +1,4 @@
-module github.com/quantonganh/fe
+module github.com/quantonganh/diagtree
 
 go 1.23
 
@@ -11,7 +11,6 @@ require (
 require (
 	github.com/charlievieth/fastwalk v1.0.9 // indirect
 	github.com/junegunn/go-shellwords v0.0.0-20240813092932-a62c48c52e97 // indirect
-	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	golang.org/x/exp v0.0.0-20190731235908-ec7cb31e5a56 // indirect
 	golang.org/x/image v0.6.0 // indirect
@@ -19,14 +18,14 @@ require (
 )
 
 require (
-	github.com/fatih/color v1.18.0
 	github.com/gdamore/encoding v1.0.0 // indirect
+	github.com/lithammer/fuzzysearch v1.1.8
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	golang.design/x/clipboard v0.7.0
 	golang.org/x/sys v0.28.0 // indirect
-	golang.org/x/term v0.27.0
+	golang.org/x/term v0.27.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1
 )

@@ -7,9 +7,9 @@ root:
       children:
         - name: godoc
           children:
-            - command: >
+            - onExpand: >
                 go list std
               children:
-                - command: go doc -short $current | grep '^[ ]*func' | sed -E 's/^[ ]*func ([^[(]+).*/\1/'
+                - onExpand: go doc -short $current | grep '^[ ]*func' | sed -E 's/^[ ]*func ([^[(]+).*/\1/'
                   children:
-                  - finalCommand: go doc $parent.$current | less
+                  - onSelect: go doc $parent.$current | less
